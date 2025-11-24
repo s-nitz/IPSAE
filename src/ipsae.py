@@ -7,6 +7,7 @@ import logging
 import warnings
 import re
 import zipfile
+import gzip
 from collections.abc import Iterable
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
@@ -231,12 +232,14 @@ def classify_chains(chains, residue_types):
     return np.invert(np.bitwise_or(chain_types, chain_types.T))
 
 
-def load_af2_data(pae_file_path, numres):
-    if pae_file_path.endswith(".pkl"):
-        data = np.load(pae_file_path, allow_pickle=True)
+def load_af2_data(pae_file, numres):
+    if pae_file.name.endswith(".pkl"):
+        data = np.load(pae_file, allow_pickle=True)
+    elif pae_file.name.endswith(".gz"):
+        with gzip.open(pae_file.name, "r") as f:
+            data = json.load(f)
     else:
-        with open(pae_file_path, "r") as file:
-            data = json.load(file)
+        data = json.load(pae_file)
 
     if "iptm" in data:
         iptm = float(data["iptm"])
@@ -399,7 +402,7 @@ def read_pdb(
     atomsitefield_dict = {}
     atomsitefield_num = 0
     for i, line in enumerate(pdb_file.readlines()):
-        if protein_file_type == "cif":
+        if protein_file_type == "cif" and isinstance(line, bytes):
             line = line.decode("utf-8")
         if line.startswith("_atom_site."):
             line = line.strip()
@@ -916,7 +919,12 @@ def _zipsae(
     zipfile_dir,
     output_dir,
 ):
-    poolnum, modelnum, pdb_path, pae_path, summary_path = paths
+    (
+        poolnum,
+        modelnum,
+        pdb_path,
+        pae_path,
+    ) = paths
     logging.info(f"Running ipSAE on file {pdb_path}")
     with zipfile.ZipFile(zipfile_dir) as archive:
         algorithm, protein_file_type, _, _, _, _ = configure(
@@ -928,9 +936,12 @@ def _zipsae(
 
         with archive.open(pdb_path, "r") as pdb_file, archive.open(
             pae_path, "r"
-        ) as pae_file, archive.open(summary_path, "r") as summary_file:
+        ) as pae_file:
             residues, chains, distances, pae_matrix, cb_plddt = setup(
-                pdb_file, pae_file, protein_file_type, algorithm, summary_file
+                pdb_file,
+                pae_file,
+                protein_file_type,
+                algorithm,
             )
         chain_asym, chain_max = ipsae(
             residues, chains, distances, pae_matrix, cb_plddt, pae_cutoff
@@ -941,13 +952,13 @@ def _zipsae(
         )
 
 
-def _single_ipsae(
+def single_ipsae(
     paths,
     pae_cutoff,
     dist_cutoff,
     output_dir,
 ):
-    poolnum, modelnum, pdb_path, pae_path, summary_path = paths
+    poolnum, modelnum, pdb_path, pae_path = paths
     logging.info(f"Running ipSAE on file {pdb_path}")
     algorithm, protein_file_type, _, _, _, _ = configure(
         pdb_path,
@@ -956,12 +967,13 @@ def _single_ipsae(
         dist_cutoff,
     )
 
-    with open(pdb_path, "r") as pdb_file, open(pae_path, "r") as pae_file, open(
-        summary_path, "r"
-    ) as summary_file:
+    with open(pdb_path, "r") as pdb_file, open(pae_path, "r") as pae_file:
 
         residues, chains, distances, pae_matrix, cb_plddt = setup(
-            pdb_file, pae_file, protein_file_type, algorithm, summary_file
+            pdb_file,
+            pae_file,
+            protein_file_type,
+            algorithm,
         )
 
     chain_asym, chain_max = ipsae(
@@ -969,7 +981,7 @@ def _single_ipsae(
     )
 
     write_outputs(
-        os.path.join(output_dir, poolnum, str(modelnum)), chain_asym, chain_max
+        os.path.join(output_dir, str(poolnum), str(modelnum)), chain_asym, chain_max
     )
 
 
@@ -1006,7 +1018,14 @@ def run_from_zip(
                 pae_path = os.path.join(
                     dirname, f"{file_prefix}_{poolnum}_full_data_{modelnum}.json"
                 )
-                inputs.append((poolnum, modelnum, pdb_path, pae_path, filename))
+                inputs.append(
+                    (
+                        poolnum,
+                        modelnum,
+                        pdb_path,
+                        pae_path,
+                    )
+                )
                 # inputs = (poolnum, modelnum, pdb_path, pae_path, filename)
                 # _zipsae(inputs, pae_cutoff, dist_cutoff, zipfile_dir, output_dir)
                 # break
@@ -1047,7 +1066,14 @@ def run_from_folder(
             pae_path = os.path.join(
                 dirname, f"{file_prefix}_{poolnum}_full_data_{modelnum}.json"
             )
-            inputs.append((poolnum, modelnum, pdb_path, pae_path, filename))
+            inputs.append(
+                (
+                    poolnum,
+                    modelnum,
+                    pdb_path,
+                    pae_path,
+                )
+            )
         elif match := re.search(
             r"(\w+)_summary_confidences.json", filename
         ):  # af3 local style (?)
@@ -1055,7 +1081,14 @@ def run_from_folder(
             zinc_id = match.groups()[0]
             pdb_path = os.path.join(dirname, f"{zinc_id}_model.cif")
             pae_path = os.path.join(dirname, f"{zinc_id}_confidences.json")
-            inputs.append((zinc_id, 0, pdb_path, pae_path, filename))
+            inputs.append(
+                (
+                    zinc_id,
+                    0,
+                    pdb_path,
+                    pae_path,
+                )
+            )
         elif match := re.search(
             r"confidence_(\w+)_model_(\d+).json", filename
         ):  # boltz2 style
@@ -1063,12 +1096,19 @@ def run_from_folder(
             zinc_id, modelnum = match.groups()
             pdb_path = os.path.join(dirname, f"{zinc_id}_model_{modelnum}.cif")
             pae_path = os.path.join(dirname, f"pae_{zinc_id}_model_{modelnum}.npz")
-            inputs.append((zinc_id, modelnum, pdb_path, pae_path, filename))
+            inputs.append(
+                (
+                    zinc_id,
+                    modelnum,
+                    pdb_path,
+                    pae_path,
+                )
+            )
 
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
         # enumerate pdb and pae files
         configured_single_ipsae = partial(
-            _single_ipsae,
+            single_ipsae,
             pae_cutoff=pae_cutoff,
             dist_cutoff=dist_cutoff,
             output_dir=output_dir,
@@ -1082,7 +1122,6 @@ def setup(
     pae_file: Iterable[str],
     protein_file_type,
     algorithm,
-    summary_file=None,
 ):
     """Format inputs.
 

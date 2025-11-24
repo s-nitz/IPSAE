@@ -1,2 +1,5 @@
 test/**
+!test/Example/*
 !test/*.py
+mtb_essentials_allvall_*/**
+src/__pycache__/*
