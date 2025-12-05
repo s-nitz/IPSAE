@@ -1,17 +1,11 @@
-import argparse
 import sys
 import os
 import math
 import json
 import logging
 import warnings
-import re
-import zipfile
 import gzip
 from collections.abc import Iterable
-from concurrent.futures import ProcessPoolExecutor
-from functools import partial
-from glob import glob
 
 import numpy as np
 import pandas as pd
@@ -650,15 +644,18 @@ def ipsae_reslevel(chains, residue_types, pae_matrix, pae_cutoff):
     """"""
     logging.info("Calculating denominators")
     # get chain matrices
+    logging.info(f"chains: {chains}")
     unique_chains, unique_chain_lengths = np.unique(
         chains, return_counts=True, sorted=False
     )
+    logging.info("got unique chains")
     length_array = np.array([unique_chain_lengths] * len(unique_chain_lengths))
     chain_length_sum_array = length_array + length_array.T
     chain_type_matrix = classify_chains(chains, residue_types)
+    logging.info("categorizing chains")
     chain_indicator_matrix = np.array([chains == c for c in unique_chains])
     nchains = len(unique_chains)
-
+    logging.info("masking the PAE matrix")
     masked_pae_matrix = np.where(
         np.bitwise_and(
             (pae_matrix < pae_cutoff),
@@ -678,7 +675,7 @@ def ipsae_reslevel(chains, residue_types, pae_matrix, pae_cutoff):
     ipsae_pair_counts, ipsae_nunique_residues_chain1, ipsae_nunique_residues_chain2 = (
         get_residue_info(chains, ipsae_residue_matrix)
     )
-
+    logging.info("n0dom, d0dom, n0res, d0res")
     # n0dom: numres in chain pair with PAEs < cutoff, ie. number of residues contributing to ipSAE calculation
     n0dom = (
         ipsae_nunique_residues_chain1 + ipsae_nunique_residues_chain2
@@ -900,223 +897,6 @@ def chainlevel_outputs(
     return chainlevel_asym, chainlevel_max
 
 
-def write_outputs(output_dir, chain_asym, chain_max):
-    logging.info("Writing chain-level outputs")
-    asym_output = os.path.join(output_dir, "asym")
-    max_output = os.path.join(output_dir, "max")
-    os.makedirs(asym_output, exist_ok=True)
-    os.makedirs(max_output, exist_ok=True)
-    for metric, df in chain_asym.items():
-        df.to_csv(os.path.join(asym_output, f"{metric}.csv"))
-    for metric, df in chain_max.items():
-        df.to_csv(os.path.join(max_output, f"{metric}.csv"))
-
-
-def _zipsae(
-    paths,
-    pae_cutoff,
-    dist_cutoff,
-    zipfile_dir,
-    output_dir,
-):
-    (
-        poolnum,
-        modelnum,
-        pdb_path,
-        pae_path,
-    ) = paths
-    logging.info(f"Running ipSAE on file {pdb_path}")
-    with zipfile.ZipFile(zipfile_dir) as archive:
-        algorithm, protein_file_type, _, _, _, _ = configure(
-            pdb_path,
-            pae_path,
-            pae_cutoff,
-            dist_cutoff,
-        )
-
-        with archive.open(pdb_path, "r") as pdb_file, archive.open(
-            pae_path, "r"
-        ) as pae_file:
-            residues, chains, distances, pae_matrix, cb_plddt = setup(
-                pdb_file,
-                pae_file,
-                protein_file_type,
-                algorithm,
-            )
-        chain_asym, chain_max = ipsae(
-            residues, chains, distances, pae_matrix, cb_plddt, pae_cutoff
-        )
-
-        write_outputs(
-            os.path.join(output_dir, poolnum, modelnum), chain_asym, chain_max
-        )
-
-
-def single_ipsae(
-    paths,
-    pae_cutoff,
-    dist_cutoff,
-    output_dir,
-):
-    poolnum, modelnum, pdb_path, pae_path = paths
-    logging.info(f"Running ipSAE on file {pdb_path}")
-    algorithm, protein_file_type, _, _, _, _ = configure(
-        pdb_path,
-        pae_path,
-        pae_cutoff,
-        dist_cutoff,
-    )
-
-    with open(pdb_path, "r") as pdb_file, open(pae_path, "r") as pae_file:
-
-        residues, chains, distances, pae_matrix, cb_plddt = setup(
-            pdb_file,
-            pae_file,
-            protein_file_type,
-            algorithm,
-        )
-
-    chain_asym, chain_max = ipsae(
-        residues, chains, distances, pae_matrix, cb_plddt, pae_cutoff
-    )
-
-    write_outputs(
-        os.path.join(output_dir, str(poolnum), str(modelnum)), chain_asym, chain_max
-    )
-
-
-def run_from_zip(
-    zipfile_dir,
-    pae_cutoff,
-    dist_cutoff,
-    output_dir,
-    num_workers=12,
-    file_prefix="fold_mtb_essentials_allvall",
-    resume=False,
-):
-
-    with zipfile.ZipFile(zipfile_dir) as archive:
-        inputs = []
-        for filename in archive.namelist():
-            if match := re.search(
-                rf"{file_prefix}_(\d+)_summary_confidences_(\d).json", filename
-            ):
-                dirname = os.path.dirname(filename)
-                poolnum, modelnum = match.groups()
-                if resume:
-                    existing_path = os.path.join(
-                        output_dir, poolnum, modelnum, "max", "*.csv"
-                    )
-                    if len(glob(existing_path)) >= 4:
-                        logging.info(
-                            f"Pool {poolnum} model {modelnum} already complete, skipping."
-                        )
-                        continue
-                pdb_path = os.path.join(
-                    dirname, f"{file_prefix}_{poolnum}_model_{modelnum}.cif"
-                )
-                pae_path = os.path.join(
-                    dirname, f"{file_prefix}_{poolnum}_full_data_{modelnum}.json"
-                )
-                inputs.append(
-                    (
-                        poolnum,
-                        modelnum,
-                        pdb_path,
-                        pae_path,
-                    )
-                )
-                # inputs = (poolnum, modelnum, pdb_path, pae_path, filename)
-                # _zipsae(inputs, pae_cutoff, dist_cutoff, zipfile_dir, output_dir)
-                # break
-
-    with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        # enumerate pdb and pae files
-        configured_zipsae = partial(
-            _zipsae,
-            pae_cutoff=pae_cutoff,
-            dist_cutoff=dist_cutoff,
-            zipfile_dir=zipfile_dir,
-            output_dir=output_dir,
-        )
-
-        executor.map(configured_zipsae, inputs)
-
-
-def run_from_folder(
-    input_dir,
-    pae_cutoff,
-    dist_cutoff,
-    output_dir,
-    num_workers=12,
-    file_prefix="fold_mtb_essentials_allvall",
-):
-    inputs = []
-    for filename in glob(
-        os.path.join(input_dir, "**/*confidence*.json"), recursive=True
-    ):
-        if match := re.search(
-            r"(\d+)_summary_confidences_(\d).json", filename
-        ):  # (pooled) af3 server style
-            dirname = os.path.dirname(filename)
-            poolnum, modelnum = match.groups()
-            pdb_path = os.path.join(
-                dirname, f"{file_prefix}_{poolnum}_model_{modelnum}.cif"
-            )
-            pae_path = os.path.join(
-                dirname, f"{file_prefix}_{poolnum}_full_data_{modelnum}.json"
-            )
-            inputs.append(
-                (
-                    poolnum,
-                    modelnum,
-                    pdb_path,
-                    pae_path,
-                )
-            )
-        elif match := re.search(
-            r"(\w+)_summary_confidences.json", filename
-        ):  # af3 local style (?)
-            dirname = os.path.dirname(filename)
-            zinc_id = match.groups()[0]
-            pdb_path = os.path.join(dirname, f"{zinc_id}_model.cif")
-            pae_path = os.path.join(dirname, f"{zinc_id}_confidences.json")
-            inputs.append(
-                (
-                    zinc_id,
-                    0,
-                    pdb_path,
-                    pae_path,
-                )
-            )
-        elif match := re.search(
-            r"confidence_(\w+)_model_(\d+).json", filename
-        ):  # boltz2 style
-            dirname = os.path.dirname(filename)
-            zinc_id, modelnum = match.groups()
-            pdb_path = os.path.join(dirname, f"{zinc_id}_model_{modelnum}.cif")
-            pae_path = os.path.join(dirname, f"pae_{zinc_id}_model_{modelnum}.npz")
-            inputs.append(
-                (
-                    zinc_id,
-                    modelnum,
-                    pdb_path,
-                    pae_path,
-                )
-            )
-
-    with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        # enumerate pdb and pae files
-        configured_single_ipsae = partial(
-            single_ipsae,
-            pae_cutoff=pae_cutoff,
-            dist_cutoff=dist_cutoff,
-            output_dir=output_dir,
-        )
-
-        executor.map(configured_single_ipsae, inputs)
-
-
 def setup(
     pdb_file: Iterable[str],
     pae_file: Iterable[str],
@@ -1190,54 +970,3 @@ def ipsae(residues, chains, distances, pae_matrix, cb_plddt, pae_cutoff):
 
     # calculate chain-level metrics
     return chainlevel_outputs(chains, reslevel)
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("input_dir")
-    parser.add_argument("pae_cutoff", type=float)
-    parser.add_argument("dist_cutoff", type=float)
-    parser.add_argument("output_dir")
-    parser.add_argument(
-        "-p", "--file-prefix", type=str, default="fold_mtb_essentials_allvall"
-    )
-    parser.add_argument("-v", "--verbose", action="store_true")
-    parser.add_argument("-w", "--workers", type=int)
-    parser.add_argument("-d", "--dry-run", action="store_true")
-    parser.add_argument("-r", "--resume", action="store_true")
-
-    args = parser.parse_args()
-    loglevel = logging.INFO if args.verbose else logging.WARN
-    logging.basicConfig(format="%(asctime)s::%(message)s", level=loglevel)
-
-    if ".zip" in args.input_dir:
-        if args.dry_run:
-            print(f"Would run on zipfile {args.input_dir}.")
-        else:
-            logging.info(
-                f"Running ipSAE on all outputs stored in zipfile {args.input_dir}"
-            )
-            run_from_zip(
-                args.input_dir,
-                args.pae_cutoff,
-                args.dist_cutoff,
-                args.output_dir,
-                num_workers=args.workers,
-                resume=args.resume,
-            )
-    else:  # assumes you're running from a directory
-        logging.info(
-            f"Running ipSAE on all outputs stored in directory {args.input_dir}"
-        )
-        run_from_folder(
-            args.input_dir,
-            args.pae_cutoff,
-            args.dist_cutoff,
-            args.output_dir,
-            num_workers=args.workers,
-            file_prefix=args.file_prefix,
-        )
-
-
-if __name__ == "__main__":
-    main()

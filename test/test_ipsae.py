@@ -1,10 +1,11 @@
 import os
+import shutil
 
 import pytest
 import pandas as pd
 import numpy as np
 
-from src.ipsae import single_ipsae, run_from_zip
+from src.cli import single_ipsae, run_from_zip
 
 
 def _load_dunbrack_output(filename_prefix):
@@ -25,6 +26,13 @@ def _ipsae_aurka_tpx2():
         "test/Example/fold_aurka_0_tpx2_0_full_data_0.json",
     )
     single_ipsae(paths, 10, 10, "test/aurka_tpx2/")
+
+
+def test_aurka_tpx2():
+    shutil.rmtree("test/aurka_tpx2/")
+    # run IPSAE on the pair
+    _ipsae_aurka_tpx2()
+    # convert dunbrack outputs to my output format
     res_df, cc_df = _load_dunbrack_output(
         "test/Example/fold_aurka_0_tpx2_0_model_0_10_10"
     )
@@ -39,12 +47,6 @@ def _ipsae_aurka_tpx2():
     )
 
 
-def test_aurka_tpx2():
-    # run IPSAE on the pair
-    _ipsae_aurka_tpx2()
-    # convert dunbrack outputs to my output format
-
-
 def _ipsae_raf1_ksr1_mek1_9f755():
     # (poolnum, modelnum, pdb_path, pae_path, summary_file)
     paths = (
@@ -54,6 +56,13 @@ def _ipsae_raf1_ksr1_mek1_9f755():
         "test/Example/RAF1_KSR1_MEK1_9f755_scores_alphafold2_multimer_v3_model_1_seed_000.json.gz",
     )
     single_ipsae(paths, 15, 15, "test/raf1_ksr1_mek1_9f755/")
+
+
+def test_raf1_ksr1_mek1_9f755():
+    shutil.rmtree("test/raf1_ksr1_mek1_9f755/", ignore_errors=True)
+    _ipsae_raf1_ksr1_mek1_9f755()
+
+    # load outputs
     res_df, cc_df = _load_dunbrack_output(
         "test/Example/RAF1_KSR1_MEK1_9f755_unrelaxed_alphafold2_multimer_v3_model_1_seed_000_15_15"
     )
@@ -70,23 +79,24 @@ def _ipsae_raf1_ksr1_mek1_9f755():
     )
 
 
-def test_raf1_ksr1_mek1_9f755():
-    _ipsae_raf1_ksr1_mek1_9f755()
-
-    # load outputs
-    # "test/raf1_ksr1_mek1_9f755/0/0/max/ipsae_d0res.csv"
-
-
 # run my example
-# def _ipsae_mtb_essess_fullzip():
-#     run_from_zip(
-#         "test/mtb_essess/inputs.zip",
-#         10,
-#         10,
-#         "test/mtb_essess/outputs/",
-#     )
+def _ipsae_mtb_essess_fullzip():
+    # 2971 is a negative control: we don't expect any of it to interact
+    run_from_zip(
+        "test/mtb_essess/inputs/test_2971.zip",
+        10,
+        10,
+        "test/mtb_essess/outputs/2971/",
+    )
 
 
-# def test_mtb_essess_fullzip():
-#     # this takes too long, make a different zipfile
-#     _ipsae_mtb_essess_fullzip()
+def test_mtb_essess_fullzip():
+    shutil.rmtree("test/mtb_essess/outputs/2971/", ignore_errors=True)
+    _ipsae_mtb_essess_fullzip()
+
+    # assert that the outputs get created de novo
+    assert os.path.exists(
+        "test/mtb_essess/outputs/2971/"
+    ), "Failed to create output directory."
+
+    # assert they're correct

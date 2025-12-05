@@ -1,5 +1,6 @@
 test/**
 !test/Example/*
 !test/*.py
+!test/mtb_essess/inputs/
 mtb_essentials_allvall_*/**
 src/__pycache__/*
